@@ -80,6 +80,41 @@
         border: 1px solid rgba(148, 163, 184, 0.18);
       }
 
+      .message h3 {
+        margin: 0 0 8px;
+        font-size: 0.95rem;
+        color: #7dd3fc;
+      }
+
+      .message p,
+      .message ul,
+      .message article {
+        margin: 0;
+      }
+
+      .message section + section {
+        margin-top: 14px;
+        padding-top: 14px;
+        border-top: 1px solid rgba(148, 163, 184, 0.12);
+      }
+
+      .message ul,
+      .message ol {
+        padding-left: 18px;
+      }
+
+      .message li + li,
+      .message article + article,
+      .message article p + p,
+      .message article p + a,
+      .message article a + p {
+        margin-top: 6px;
+      }
+
+      .message a {
+        color: #7dd3fc;
+      }
+
       .composer {
         display: grid;
         grid-template-columns: 1fr auto;

@@ -14,6 +14,35 @@ type ChatMessage = {
 const apiKey = process.env.OPENAI_API_KEY;
 const tavilyApiKey = process.env.TAVILY_API_KEY;
 
+const ProtocolSchema = z.object({
+  title: z.string(),
+  abstract: z.string(),
+  equipment: z.array(z.string()),
+  materialsReagents: z.array(z.string()),
+  safetyConsiderations: z.array(z.string()),
+  procedure: z.array(z.string()),
+  references: z.array(z.string()),
+});
+
+const ProtocolSearchResultSchema = z.object({
+  query: z.string(),
+  answer: z.string().nullable(),
+  results: z.array(z.object({
+    title: z.string(),
+    url: z.string(),
+    snippet: z.string(),
+    sourceType: z.string(),
+  })),
+});
+
+const PROTOCOL_DOMAINS = [
+  "protocols.io",
+  "bio-protocol.org",
+  "nature.com",
+  "jove.com",
+  "openwetware.org",
+] as const;
+
 if (!apiKey) {
   throw new Error("Missing OPENAI_API_KEY in environment.");
 }
@@ -21,6 +50,59 @@ if (!apiKey) {
 setDefaultOpenAIKey(apiKey);
 
 const tavilyClient = tavilyApiKey ? tavily({ apiKey: tavilyApiKey }) : null;
+
+function getSourceType(url: string) {
+  const hostname = new URL(url).hostname.replace(/^www\./, "");
+
+  if (hostname === "protocols.io" || hostname.endsWith(".protocols.io")) {
+    return "protocols.io";
+  }
+
+  if (hostname === "bio-protocol.org" || hostname.endsWith(".bio-protocol.org")) {
+    return "bio-protocol";
+  }
+
+  if (hostname === "jove.com" || hostname.endsWith(".jove.com")) {
+    return "jove";
+  }
+
+  if (hostname === "openwetware.org" || hostname.endsWith(".openwetware.org")) {
+    return "openwetware";
+  }
+
+  if (hostname === "nature.com" || hostname.endsWith(".nature.com")) {
+    return url.includes("/nprot") ? "nature-protocols" : "nature";
+  }
+
+  return hostname;
+}
+
+function isAllowedProtocolUrl(url: string) {
+  const parsedUrl = new URL(url);
+  const hostname = parsedUrl.hostname.replace(/^www\./, "");
+
+  if (hostname === "nature.com" || hostname.endsWith(".nature.com")) {
+    return parsedUrl.pathname.startsWith("/nprot");
+  }
+
+  return PROTOCOL_DOMAINS.some((domain) => hostname === domain || hostname.endsWith(`.${domain}`));
+}
+
+function buildProtocolQuery(query: string) {
+  return `${query} (protocol OR methods OR procedure OR workflow) site:protocols.io OR site:bio-protocol.org OR site:nature.com/nprot OR site:jove.com OR site:openwetware.org`;
+}
+
+function orderProtocolOutput(protocol: z.infer<typeof ProtocolSchema>) {
+  return {
+    title: protocol.title,
+    abstract: protocol.abstract,
+    equipment: protocol.equipment,
+    materialsReagents: protocol.materialsReagents,
+    safetyConsiderations: protocol.safetyConsiderations,
+    procedure: protocol.procedure,
+    references: protocol.references,
+  };
+}
 
 const searchWebParameters = z.object({
   query: z.string().min(1).describe("The search query to run on the web."),
@@ -30,13 +112,17 @@ const searchWebParameters = z.object({
 });
 
 const searchWebTool = tool({
-  name: "search_web",
+  name: "search_protocols",
   description:
-    "Search the web with Tavily for current events, recent facts, or sources that need live verification.",
+    "Search protocol sources with Tavily and return structured source data for protocol generation using only approved repositories.",
   parameters: searchWebParameters,
   execute: async (input) => {
     if (!tavilyClient) {
-      return "Tavily search is unavailable because TAVILY_API_KEY is not configured.";
+      return {
+        query: input.query.trim(),
+        answer: "Tavily search is unavailable because TAVILY_API_KEY is not configured.",
+        results: [],
+      };
     }
 
     const query = input.query.trim();
@@ -44,26 +130,33 @@ const searchWebTool = tool({
     const maxResults = input.maxResults ?? undefined;
     const timeRange = input.timeRange ?? undefined;
 
-    const response = await tavilyClient.search(query, {
-      topic: topic ?? undefined,
+    const response = await tavilyClient.search(buildProtocolQuery(query), {
+      topic: topic ?? "general",
       timeRange: timeRange ?? undefined,
       maxResults: maxResults ?? 5,
       includeAnswer: true,
       searchDepth: "advanced",
+      includeDomains: [...PROTOCOL_DOMAINS],
     });
 
-    const lines = [
-      `Query: ${response.query}`,
-      response.answer ? `Answer: ${response.answer}` : null,
-      "Results:",
-      ...response.results.map((result, index) => [
-        `${index + 1}. ${result.title}`,
-        `URL: ${result.url}`,
-        `Snippet: ${result.content}`,
-      ].join("\n")),
-    ].filter((value): value is string => Boolean(value));
+    const filteredResults = response.results.filter((result) => {
+      try {
+        return isAllowedProtocolUrl(result.url);
+      } catch {
+        return false;
+      }
+    });
 
-    return lines.join("\n\n");
+    return ProtocolSearchResultSchema.parse({
+      query,
+      answer: response.answer ?? null,
+      results: filteredResults.map((result) => ({
+        title: result.title,
+        url: result.url,
+        snippet: result.content,
+        sourceType: getSourceType(result.url),
+      })),
+    });
   },
 });
 
@@ -73,7 +166,8 @@ const port = Number(process.env.PORT ?? 3000);
 const agent = new Agent({
   name: "Science Assistant",
   instructions:
-    "You are a concise science assistant. Answer clearly, ask follow-up questions only when needed, and keep explanations practical. Use the search_web tool for current events, recent research, or anything that needs live web verification. When you use web search, cite the relevant URLs in your answer.",
+    "You are a protocol authoring assistant. Use the search_protocols tool to gather source material, then produce a structured protocol object. The only approved repositories are protocols.io, bio-protocol.org, nature.com/nprot, jove.com, and openwetware.org. Fill these fields only from retrieved evidence when possible in this exact order: title, abstract, equipment, materialsReagents, safetyConsiderations, procedure, references. Do not invent unsupported references and do not rely on sites outside the approved repositories. Put citation strings and URLs in references, and write procedure as an ordered list of concrete steps.",
+  outputType: ProtocolSchema,
   tools: [searchWebTool],
 });
 
@@ -102,11 +196,7 @@ app.post("/api/chat", async (req, res) => {
     });
 
     const result = await run(agent, input);
-    const reply = typeof result.finalOutput === "string"
-      ? result.finalOutput
-      : JSON.stringify(result.finalOutput, null, 2);
-
-    return res.json({ reply });
+    return res.json({ reply: orderProtocolOutput(ProtocolSchema.parse(result.finalOutput)) });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     return res.status(500).json({ error: message });
