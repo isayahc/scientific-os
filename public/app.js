@@ -67,6 +67,16 @@ function renderStructuredContent(content) {
 
         section.appendChild(list);
       }
+    } else if (value && typeof value === "object") {
+      const block = document.createElement("article");
+
+      for (const [itemKey, itemValue] of Object.entries(value)) {
+        const line = document.createElement("p");
+        line.textContent = `${formatLabel(itemKey)}: ${String(itemValue)}`;
+        block.appendChild(line);
+      }
+
+      section.appendChild(block);
     } else {
       const body = document.createElement("p");
       body.textContent = String(value);

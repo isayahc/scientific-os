@@ -19,6 +19,21 @@ const ProtocolSchema = z.object({
   abstract: z.string(),
   equipment: z.array(z.string()),
   materialsReagents: z.array(z.string()),
+  cost: z.object({
+    estimate: z.string(),
+    currency: z.string(),
+    notes: z.string(),
+  }),
+  timeline: z.object({
+    duration: z.string(),
+    prepTime: z.string(),
+    runTime: z.string(),
+  }),
+  energyCost: z.object({
+    estimate: z.string(),
+    units: z.string(),
+    notes: z.string(),
+  }),
   safetyConsiderations: z.array(z.string()),
   procedure: z.array(z.string()),
   references: z.array(z.string()),
@@ -98,6 +113,9 @@ function orderProtocolOutput(protocol: z.infer<typeof ProtocolSchema>) {
     abstract: protocol.abstract,
     equipment: protocol.equipment,
     materialsReagents: protocol.materialsReagents,
+    cost: protocol.cost,
+    timeline: protocol.timeline,
+    energyCost: protocol.energyCost,
     safetyConsiderations: protocol.safetyConsiderations,
     procedure: protocol.procedure,
     references: protocol.references,
@@ -166,7 +184,7 @@ const port = Number(process.env.PORT ?? 3000);
 const agent = new Agent({
   name: "Science Assistant",
   instructions:
-    "You are a protocol authoring assistant. Use the search_protocols tool to gather source material, then produce a structured protocol object. The only approved repositories are protocols.io, bio-protocol.org, nature.com/nprot, jove.com, and openwetware.org. Fill these fields only from retrieved evidence when possible in this exact order: title, abstract, equipment, materialsReagents, safetyConsiderations, procedure, references. Do not invent unsupported references and do not rely on sites outside the approved repositories. Put citation strings and URLs in references, and write procedure as an ordered list of concrete steps.",
+    "You are a protocol authoring assistant. Use the search_protocols tool to gather source material, then produce a structured protocol object. The only approved repositories are protocols.io, bio-protocol.org, nature.com/nprot, jove.com, and openwetware.org. Fill these fields only from retrieved evidence when possible in this exact order: title, abstract, equipment, materialsReagents, cost, timeline, energyCost, safetyConsiderations, procedure, references. Do not invent unsupported references and do not rely on sites outside the approved repositories. Represent cost as { estimate, currency, notes }, timeline as { duration, prepTime, runTime }, and energyCost as { estimate, units, notes }. Estimate them conservatively from the retrieved protocol evidence and typical lab execution requirements. Put citation strings and URLs in references, and write procedure as an ordered list of concrete steps.",
   outputType: ProtocolSchema,
   tools: [searchWebTool],
 });
