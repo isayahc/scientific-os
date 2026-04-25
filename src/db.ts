@@ -76,6 +76,31 @@ type VersionRow = {
   created_at: Date;
 };
 
+type SearchRow = {
+  protocol_id: string;
+  version_number: number;
+  payload: ProtocolRecord;
+  distance: number;
+  created_at: Date;
+};
+
+export type SavedProtocolSearchResult = {
+  protocolId: string;
+  versionNumber: number;
+  title: string;
+  abstract: string;
+  distance: number;
+  createdAt: string;
+};
+
+export type SavedProtocolListItem = {
+  protocolId: string;
+  versionNumber: number;
+  title: string;
+  abstract: string;
+  createdAt: string;
+};
+
 export async function ensureDatabaseSchema() {
   if (!schemaReady) {
     schemaReady = pool.query(SCHEMA_SQL).then(() => undefined);
@@ -184,4 +209,78 @@ export async function getLatestProtocolVersion(protocolId: string) {
   );
 
   return result.rows[0] ?? null;
+}
+
+export async function searchLatestProtocolVersions(args: {
+  embedding: number[];
+  limit: number;
+}) {
+  await ensureDatabaseSchema();
+
+  const result = await pool.query<SearchRow>(
+    `WITH latest_versions AS (
+       SELECT DISTINCT ON (protocol_id)
+         protocol_id,
+         version_number,
+         payload,
+         embedding,
+         created_at
+       FROM protocol_versions
+       WHERE embedding IS NOT NULL
+       ORDER BY protocol_id, version_number DESC
+     )
+     SELECT
+       protocol_id,
+       version_number,
+       payload,
+       created_at,
+       embedding <=> $1::vector AS distance
+     FROM latest_versions
+     ORDER BY embedding <=> $1::vector
+     LIMIT $2`,
+    [`[${args.embedding.join(",")}]`, args.limit],
+  );
+
+  return result.rows.map((row) => ({
+    protocolId: row.protocol_id,
+    versionNumber: row.version_number,
+    title: row.payload.title,
+    abstract: row.payload.abstract,
+    distance: row.distance,
+    createdAt: row.created_at.toISOString(),
+  } satisfies SavedProtocolSearchResult));
+}
+
+export async function listLatestProtocolVersions(limit: number) {
+  await ensureDatabaseSchema();
+
+  const result = await pool.query<SearchRow>(
+    `WITH latest_versions AS (
+       SELECT DISTINCT ON (protocol_id)
+         protocol_id,
+         version_number,
+         payload,
+         created_at
+       FROM protocol_versions
+       ORDER BY protocol_id, version_number DESC
+     )
+     SELECT
+       protocol_id,
+       version_number,
+       payload,
+       created_at,
+       0::float AS distance
+     FROM latest_versions
+     ORDER BY created_at DESC
+     LIMIT $1`,
+    [limit],
+  );
+
+  return result.rows.map((row) => ({
+    protocolId: row.protocol_id,
+    versionNumber: row.version_number,
+    title: row.payload.title,
+    abstract: row.payload.abstract,
+    createdAt: row.created_at.toISOString(),
+  } satisfies SavedProtocolListItem));
 }

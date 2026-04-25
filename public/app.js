@@ -2,6 +2,7 @@ const form = document.querySelector("#chat-form");
 const promptInput = document.querySelector("#prompt");
 const messagesRoot = document.querySelector("#messages");
 const sendButton = document.querySelector("#send");
+const protocolListRoot = document.querySelector("#protocol-list");
 
 const messages = [
   {
@@ -12,6 +13,93 @@ const messages = [
 
 let currentProtocolId = null;
 let currentVersionNumber = null;
+let savedProtocols = [];
+
+async function selectProtocol(protocolId) {
+  try {
+    const response = await fetch(`/api/protocols/${protocolId}`);
+    const payload = await response.json();
+
+    if (!response.ok) {
+      throw new Error(payload.error || "Failed to load protocol");
+    }
+
+    currentProtocolId = payload.protocolId;
+    currentVersionNumber = payload.versionNumber;
+    messages.length = 0;
+    messages.push(
+      {
+        role: "assistant",
+        content: "Loaded saved protocol. You can now ask to modify it.",
+      },
+      {
+        role: "assistant",
+        content: payload.reply,
+      },
+    );
+    renderSavedProtocols();
+    renderMessages();
+  } catch (error) {
+    messages.push({
+      role: "assistant",
+      content: `Error: ${error instanceof Error ? error.message : "Unknown error"}`,
+    });
+    renderMessages();
+  }
+}
+
+function renderSavedProtocols() {
+  protocolListRoot.innerHTML = "";
+
+  if (savedProtocols.length === 0) {
+    const empty = document.createElement("p");
+    empty.textContent = "No saved protocols yet.";
+    protocolListRoot.appendChild(empty);
+    return;
+  }
+
+  for (const protocol of savedProtocols) {
+    const item = document.createElement("button");
+    item.className = "protocol-item";
+    item.type = "button";
+    item.dataset.protocolId = protocol.protocolId;
+    item.setAttribute("aria-pressed", String(protocol.protocolId === currentProtocolId));
+    item.addEventListener("click", () => {
+      void selectProtocol(protocol.protocolId);
+    });
+
+    const title = document.createElement("strong");
+    title.textContent = protocol.title;
+
+    const meta = document.createElement("small");
+    meta.textContent = `v${protocol.versionNumber} • ${protocol.protocolId}`;
+
+    const abstract = document.createElement("p");
+    abstract.textContent = protocol.abstract;
+
+    item.append(title, meta, abstract);
+    protocolListRoot.appendChild(item);
+  }
+}
+
+async function loadSavedProtocols() {
+  try {
+    const response = await fetch("/api/protocols?limit=25");
+    const payload = await response.json();
+
+    if (!response.ok) {
+      throw new Error(payload.error || "Failed to load protocols");
+    }
+
+    savedProtocols = payload.protocols;
+    renderSavedProtocols();
+  } catch (error) {
+    protocolListRoot.innerHTML = "";
+    const failure = document.createElement("p");
+    failure.textContent = `Failed to load protocols: ${error instanceof Error ? error.message : "Unknown error"}`;
+    protocolListRoot.appendChild(failure);
+  }
+}
 
 function formatLabel(label) {
   return label
@@ -140,6 +228,9 @@ async function sendMessage(userMessage) {
     currentProtocolId = payload.protocolId ?? currentProtocolId;
     currentVersionNumber = payload.versionNumber ?? currentVersionNumber;
     messages.push({ role: "assistant", content: payload.reply });
+    if (payload.protocolId && payload.versionNumber) {
+      await loadSavedProtocols();
+    }
     renderMessages();
   } catch (error) {
     messages.push({
@@ -165,4 +256,5 @@ form.addEventListener("submit", async (event) => {
   await sendMessage(value);
 });
 
+loadSavedProtocols();
 renderMessages();

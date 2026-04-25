@@ -7,7 +7,7 @@ import { Agent, assistant, run, setDefaultOpenAIKey, system, tool, user } from "
 import { tavily } from "@tavily/core";
 import { z } from "zod";
 
-import { ensureDatabaseSchema, getLatestProtocolVersion, saveProtocolVersion } from "./db.js";
+import { ensureDatabaseSchema, getLatestProtocolVersion, listLatestProtocolVersions, saveProtocolVersion, searchLatestProtocolVersions } from "./db.js";
 
 type ChatMessage = {
   role: "user" | "assistant" | "system";
@@ -63,6 +63,17 @@ const ProtocolSearchResultSchema = z.object({
     url: z.string(),
     snippet: z.string(),
     sourceType: z.string(),
+  })),
+});
+
+const SavedProtocolSearchResultSchema = z.object({
+  results: z.array(z.object({
+    protocolId: z.string(),
+    versionNumber: z.number(),
+    title: z.string(),
+    abstract: z.string(),
+    distance: z.number(),
+    createdAt: z.string(),
   })),
 });
 
@@ -189,6 +200,15 @@ async function createProtocolEmbedding(protocol: z.infer<typeof ProtocolSchema>)
   return response.data[0]?.embedding ?? [];
 }
 
+async function createSearchEmbedding(query: string) {
+  const response = await openaiClient.embeddings.create({
+    model: "text-embedding-3-small",
+    input: query,
+  });
+
+  return response.data[0]?.embedding ?? [];
+}
+
 const searchWebParameters = z.object({
   query: z.string().min(1).describe("The search query to run on the web."),
   topic: z.enum(["general", "news", "finance"]).nullable().describe("Optional search topic."),
@@ -247,26 +267,120 @@ const searchWebTool = tool({
   execute: searchProtocols,
 });
 
+const searchSavedProtocolsTool = tool({
+  name: "search_saved_protocols",
+  description:
+    "Searches saved internal protocols in Postgres and returns the closest existing protocol matches by semantic similarity.",
+  parameters: z.object({
+    query: z.string().min(1).describe("The protocol concept or method to search for in saved internal protocols."),
+    limit: z.number().int().min(1).max(10).nullable().describe("Maximum number of saved protocols to return."),
+  }),
+  execute: async ({ query, limit }) => {
+    const embedding = await createSearchEmbedding(query.trim());
+    const results = await searchLatestProtocolVersions({
+      embedding,
+      limit: limit ?? 5,
+    });
+
+    return SavedProtocolSearchResultSchema.parse({ results });
+  },
+});
+
 const app = express();
 const port = Number(process.env.PORT ?? 3000);
 
 const agent = new Agent({
   name: "Science Assistant",
   instructions:
-    "You are a protocol authoring assistant. Search context may already be provided in the conversation; use that first and do not repeatedly call search_protocols. The only approved repositories are protocols.io, bio-protocol.org, nature.com/nprot, jove.com, and openwetware.org. Fill these fields only from retrieved evidence when possible in this exact order: title, abstract, equipment, materialsReagents, cost, timeline, energyCost, safetyConsiderations, procedure, references. Do not invent unsupported references and do not rely on sites outside the approved repositories. Represent cost as { estimate, currency, notes }, timeline as { duration, prepTime, runTime }, and energyCost as { estimate, units, notes }. Estimate them conservatively from the retrieved protocol evidence and typical lab execution requirements. Put citation strings and URLs in references, and write procedure as an ordered list of concrete steps.",
+    "You are a protocol authoring assistant. Search context may already be provided in the conversation; use that first and do not repeatedly call search_protocols. If the user asks whether a similar internal protocol already exists, use search_saved_protocols. The only approved repositories for external protocol evidence are protocols.io, bio-protocol.org, nature.com/nprot, jove.com, and openwetware.org. Fill these fields only from retrieved evidence when possible in this exact order: title, abstract, equipment, materialsReagents, cost, timeline, energyCost, safetyConsiderations, procedure, references. Do not invent unsupported references and do not rely on sites outside the approved repositories. Represent cost as { estimate, currency, notes }, timeline as { duration, prepTime, runTime }, and energyCost as { estimate, units, notes }. Estimate them conservatively from the retrieved protocol evidence and typical lab execution requirements. Put citation strings and URLs in references, and write procedure as an ordered list of concrete steps.",
   outputType: ProtocolSchema,
-  tools: [searchWebTool],
+  tools: [searchWebTool, searchSavedProtocolsTool],
 });
 
 const chatAgent = new Agent({
   name: "Science Chat Assistant",
   instructions:
-    "You are a concise science assistant. Answer directly. If the user asks about protocol version state, explain it from the provided context only. Do not generate a new protocol unless explicitly asked.",
+    "You are a concise science assistant. Answer directly. If the user asks about protocol version state, explain it from the provided context only. If the user asks whether a similar saved protocol exists, use search_saved_protocols. Do not generate a new protocol unless explicitly asked.",
+  tools: [searchSavedProtocolsTool],
 });
 
 app.use(cors());
 app.use(express.json());
 app.use(express.static("public"));
+
+app.get("/api/protocols/search", async (req, res) => {
+  const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
+  const limit = typeof req.query.limit === "string" ? Number(req.query.limit) : 5;
+
+  if (!query) {
+    return res.status(400).json({ error: "Missing query parameter 'q'" });
+  }
+
+  if (!Number.isFinite(limit) || limit < 1 || limit > 20) {
+    return res.status(400).json({ error: "Query parameter 'limit' must be between 1 and 20" });
+  }
+
+  try {
+    const embedding = await createSearchEmbedding(query);
+    const results = await searchLatestProtocolVersions({
+      embedding,
+      limit,
+    });
+
+    return res.json({ query, results });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    console.error("[protocol-search] request failed", {
+      query,
+      limit,
+      error,
+    });
+    return res.status(500).json({ error: message });
+  }
+});
+
+app.get("/api/protocols", async (req, res) => {
+  const limit = typeof req.query.limit === "string" ? Number(req.query.limit) : 25;
+
+  if (!Number.isFinite(limit) || limit < 1 || limit > 100) {
+    return res.status(400).json({ error: "Query parameter 'limit' must be between 1 and 100" });
+  }
+
+  try {
+    const protocols = await listLatestProtocolVersions(limit);
+    return res.json({ protocols });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    console.error("[protocol-list] request failed", { limit, error });
+    return res.status(500).json({ error: message });
+  }
+});
+
+app.get("/api/protocols/:protocolId", async (req, res) => {
+  const protocolId = req.params.protocolId;
+
+  if (!z.string().uuid().safeParse(protocolId).success) {
+    return res.status(400).json({ error: "Invalid protocol id" });
+  }
+
+  try {
+    const protocol = await getLatestProtocolVersion(protocolId);
+
+    if (!protocol) {
+      return res.status(404).json({ error: "Protocol not found" });
+    }
+
+    return res.json({
+      protocolId,
+      versionNumber: protocol.version_number,
+      reply: protocol.payload,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    console.error("[protocol-get] request failed", { protocolId, error });
+    return res.status(500).json({ error: message });
+  }
+});
 
 app.post("/api/chat", async (req, res) => {
   const requestStartedAt = Date.now();
