@@ -10,6 +10,9 @@ const messages = [
   },
 ];
 
+let currentProtocolId = null;
+let currentVersionNumber = null;
+
 function formatLabel(label) {
   return label
     .replace(/([A-Z])/g, " $1")
@@ -105,6 +108,13 @@ function renderMessages() {
     messagesRoot.appendChild(element);
   }
 
+  if (currentProtocolId && currentVersionNumber) {
+    const meta = document.createElement("article");
+    meta.className = "message assistant";
+    meta.textContent = `Saved as protocol ${currentProtocolId} v${currentVersionNumber}`;
+    messagesRoot.appendChild(meta);
+  }
+
   messagesRoot.lastElementChild?.scrollIntoView({ behavior: "smooth", block: "end" });
 }
 
@@ -118,7 +128,7 @@ async function sendMessage(userMessage) {
     const response = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messages }),
+      body: JSON.stringify({ messages, protocolId: currentProtocolId }),
     });
 
     const payload = await response.json();
@@ -127,6 +137,8 @@ async function sendMessage(userMessage) {
       throw new Error(payload.error || "Request failed");
     }
 
+    currentProtocolId = payload.protocolId ?? currentProtocolId;
+    currentVersionNumber = payload.versionNumber ?? currentVersionNumber;
     messages.push({ role: "assistant", content: payload.reply });
     renderMessages();
   } catch (error) {
