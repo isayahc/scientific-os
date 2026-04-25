@@ -13,7 +13,8 @@ const messages = [
 
 let currentProtocolId = null;
 let currentVersionNumber = null;
-let savedProtocols = [];
+let currentConversationId = null;
+let savedConversations = [];
 
 async function selectProtocol(protocolId) {
   try {
@@ -26,6 +27,7 @@ async function selectProtocol(protocolId) {
 
     currentProtocolId = payload.protocolId;
     currentVersionNumber = payload.versionNumber;
+    currentConversationId = null;
     messages.length = 0;
     messages.push(
       {
@@ -37,7 +39,7 @@ async function selectProtocol(protocolId) {
         content: payload.reply,
       },
     );
-    renderSavedProtocols();
+    renderSavedConversations();
     renderMessages();
   } catch (error) {
     messages.push({
@@ -48,55 +50,58 @@ async function selectProtocol(protocolId) {
   }
 }
 
-function renderSavedProtocols() {
+function renderSavedConversations() {
   protocolListRoot.innerHTML = "";
 
-  if (savedProtocols.length === 0) {
+  if (savedConversations.length === 0) {
     const empty = document.createElement("p");
-    empty.textContent = "No saved protocols yet.";
+    empty.textContent = "No saved conversations yet.";
     protocolListRoot.appendChild(empty);
     return;
   }
 
-  for (const protocol of savedProtocols) {
+  for (const conversation of savedConversations) {
     const item = document.createElement("button");
     item.className = "protocol-item";
     item.type = "button";
-    item.dataset.protocolId = protocol.protocolId;
-    item.setAttribute("aria-pressed", String(protocol.protocolId === currentProtocolId));
+    item.dataset.conversationId = conversation.conversationId;
+    item.setAttribute("aria-pressed", String(conversation.conversationId === currentConversationId));
     item.addEventListener("click", () => {
-      void selectProtocol(protocol.protocolId);
+      currentConversationId = conversation.conversationId;
+      if (conversation.protocolId) {
+        void selectProtocol(conversation.protocolId);
+      }
     });
 
     const title = document.createElement("strong");
-    title.textContent = protocol.title;
+    title.textContent = conversation.title;
 
     const meta = document.createElement("small");
-    meta.textContent = `v${protocol.versionNumber} • ${protocol.protocolId}`;
+    meta.textContent = `Conversation ${conversation.conversationId} • v${conversation.versionNumber ?? "?"}`;
 
     const abstract = document.createElement("p");
-    abstract.textContent = protocol.abstract;
+    abstract.textContent = conversation.abstract;
 
     item.append(title, meta, abstract);
     protocolListRoot.appendChild(item);
   }
 }
 
-async function loadSavedProtocols() {
+async function loadSavedConversations() {
   try {
-    const response = await fetch("/api/protocols?limit=25");
+    const response = await fetch("/api/conversations?limit=25");
     const payload = await response.json();
 
     if (!response.ok) {
-      throw new Error(payload.error || "Failed to load protocols");
+      throw new Error(payload.error || "Failed to load conversations");
     }
 
-    savedProtocols = payload.protocols;
-    renderSavedProtocols();
+    savedConversations = payload.conversations;
+    renderSavedConversations();
   } catch (error) {
     protocolListRoot.innerHTML = "";
     const failure = document.createElement("p");
-    failure.textContent = `Failed to load protocols: ${error instanceof Error ? error.message : "Unknown error"}`;
+    failure.textContent = `Failed to load conversations: ${error instanceof Error ? error.message : "Unknown error"}`;
     protocolListRoot.appendChild(failure);
   }
 }
@@ -162,9 +167,55 @@ function renderStructuredContent(content) {
       const block = document.createElement("article");
 
       for (const [itemKey, itemValue] of Object.entries(value)) {
-        const line = document.createElement("p");
-        line.textContent = `${formatLabel(itemKey)}: ${String(itemValue)}`;
-        block.appendChild(line);
+        if (Array.isArray(itemValue)) {
+          const nestedSection = document.createElement("section");
+          const nestedTitle = document.createElement("h3");
+          nestedTitle.textContent = formatLabel(itemKey);
+          nestedSection.appendChild(nestedTitle);
+
+          if (itemValue.length === 0) {
+            const empty = document.createElement("p");
+            empty.textContent = "None provided.";
+            nestedSection.appendChild(empty);
+          } else {
+            const nestedList = document.createElement("div");
+
+            for (const nestedItem of itemValue) {
+              const nestedBlock = document.createElement("article");
+
+              if (nestedItem && typeof nestedItem === "object") {
+                for (const [nestedKey, nestedValue] of Object.entries(nestedItem)) {
+                  const line = document.createElement(nestedKey === "sourceUrl" ? "a" : "p");
+
+                  if (nestedKey === "sourceUrl") {
+                    line.href = String(nestedValue);
+                    line.textContent = String(nestedValue);
+                    line.target = "_blank";
+                    line.rel = "noreferrer";
+                  } else {
+                    line.textContent = `${formatLabel(nestedKey)}: ${String(nestedValue)}`;
+                  }
+
+                  nestedBlock.appendChild(line);
+                }
+              } else {
+                const line = document.createElement("p");
+                line.textContent = String(nestedItem);
+                nestedBlock.appendChild(line);
+              }
+
+              nestedList.appendChild(nestedBlock);
+            }
+
+            nestedSection.appendChild(nestedList);
+          }
+
+          block.appendChild(nestedSection);
+        } else {
+          const line = document.createElement("p");
+          line.textContent = `${formatLabel(itemKey)}: ${String(itemValue)}`;
+          block.appendChild(line);
+        }
       }
 
       section.appendChild(block);
@@ -216,7 +267,11 @@ async function sendMessage(userMessage) {
     const response = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messages, protocolId: currentProtocolId }),
+      body: JSON.stringify({
+        messages,
+        conversationId: currentConversationId,
+        protocolId: currentProtocolId,
+      }),
     });
 
     const payload = await response.json();
@@ -225,11 +280,12 @@ async function sendMessage(userMessage) {
       throw new Error(payload.error || "Request failed");
     }
 
+    currentConversationId = payload.conversationId ?? currentConversationId;
     currentProtocolId = payload.protocolId ?? currentProtocolId;
     currentVersionNumber = payload.versionNumber ?? currentVersionNumber;
     messages.push({ role: "assistant", content: payload.reply });
     if (payload.protocolId && payload.versionNumber) {
-      await loadSavedProtocols();
+      await loadSavedConversations();
     }
     renderMessages();
   } catch (error) {
@@ -256,5 +312,5 @@ form.addEventListener("submit", async (event) => {
   await sendMessage(value);
 });
 
-loadSavedProtocols();
+loadSavedConversations();
 renderMessages();

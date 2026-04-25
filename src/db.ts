@@ -17,6 +17,13 @@ CREATE TABLE IF NOT EXISTS protocols (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS conversations (
+  id UUID PRIMARY KEY,
+  protocol_id UUID REFERENCES protocols(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS protocol_versions (
   id UUID PRIMARY KEY,
   protocol_id UUID NOT NULL REFERENCES protocols(id) ON DELETE CASCADE,
@@ -38,6 +45,17 @@ CREATE INDEX IF NOT EXISTS protocol_versions_protocol_id_idx
 CREATE INDEX IF NOT EXISTS protocol_versions_embedding_idx
   ON protocol_versions USING ivfflat (embedding vector_cosine_ops)
   WITH (lists = 100);
+
+CREATE TABLE IF NOT EXISTS conversation_snapshots (
+  id UUID PRIMARY KEY,
+  conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  protocol_version_id UUID NOT NULL REFERENCES protocol_versions(id) ON DELETE CASCADE,
+  messages JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS conversation_snapshots_conversation_id_idx
+  ON conversation_snapshots (conversation_id, created_at DESC);
 `;
 
 export type ProtocolRecord = {
@@ -49,6 +67,14 @@ export type ProtocolRecord = {
     estimate: string;
     currency: string;
     notes: string;
+    lineItems: Array<{
+      item: string;
+      supplier: string;
+      estimate: string;
+      currency: string;
+      notes: string;
+      sourceUrl: string;
+    }>;
   };
   timeline: {
     duration: string;
@@ -99,6 +125,37 @@ export type SavedProtocolListItem = {
   title: string;
   abstract: string;
   createdAt: string;
+};
+
+export type ConversationListItem = {
+  conversationId: string;
+  protocolId: string | null;
+  protocolVersionId: string;
+  versionNumber: number | null;
+  title: string;
+  abstract: string;
+  updatedAt: string;
+};
+
+export type ConversationMessageRecord = {
+  role: "user" | "assistant" | "system";
+  content: string | Record<string, unknown>;
+};
+
+type ConversationRow = {
+  id: string;
+  protocol_id: string | null;
+  created_at: Date;
+  updated_at: Date;
+};
+
+type ConversationListRow = {
+  conversation_id: string;
+  protocol_id: string | null;
+  protocol_version_id: string;
+  version_number: number | null;
+  payload: ProtocolRecord;
+  updated_at: Date;
 };
 
 export async function ensureDatabaseSchema() {
@@ -197,6 +254,64 @@ export async function saveProtocolVersion(args: {
   }
 }
 
+export async function getConversation(conversationId: string) {
+  await ensureDatabaseSchema();
+
+  const result = await pool.query<ConversationRow>(
+    `SELECT id, protocol_id, created_at, updated_at
+     FROM conversations
+     WHERE id = $1
+     LIMIT 1`,
+    [conversationId],
+  );
+
+  return result.rows[0] ?? null;
+}
+
+export async function saveConversationSnapshot(args: {
+  conversationId?: string;
+  protocolId: string;
+  protocolVersionId: string;
+  messages: ConversationMessageRecord[];
+}) {
+  await ensureDatabaseSchema();
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const conversationId = args.conversationId ?? randomUUID();
+
+    await client.query(
+      `INSERT INTO conversations (id, protocol_id)
+       VALUES ($1, $2)
+       ON CONFLICT (id) DO UPDATE
+       SET protocol_id = EXCLUDED.protocol_id,
+           updated_at = NOW()`,
+      [conversationId, args.protocolId],
+    );
+
+    await client.query(
+      `INSERT INTO conversation_snapshots (
+         id,
+         conversation_id,
+         protocol_version_id,
+         messages
+       ) VALUES ($1, $2, $3, $4::jsonb)`,
+      [randomUUID(), conversationId, args.protocolVersionId, JSON.stringify(args.messages)],
+    );
+
+    await client.query("COMMIT");
+
+    return { conversationId };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 export async function getLatestProtocolVersion(protocolId: string) {
   await ensureDatabaseSchema();
   const result = await pool.query<VersionRow>(
@@ -283,4 +398,40 @@ export async function listLatestProtocolVersions(limit: number) {
     abstract: row.payload.abstract,
     createdAt: row.created_at.toISOString(),
   } satisfies SavedProtocolListItem));
+}
+
+export async function listConversations(limit: number) {
+  await ensureDatabaseSchema();
+
+  const result = await pool.query<ConversationListRow>(
+    `SELECT
+       c.id AS conversation_id,
+       c.protocol_id,
+       cs.protocol_version_id,
+       pv.version_number,
+       pv.payload,
+       c.updated_at
+     FROM conversations c
+     JOIN LATERAL (
+       SELECT protocol_version_id
+       FROM conversation_snapshots
+       WHERE conversation_id = c.id
+       ORDER BY created_at DESC
+       LIMIT 1
+     ) cs ON true
+     JOIN protocol_versions pv ON pv.id = cs.protocol_version_id
+     ORDER BY c.updated_at DESC
+     LIMIT $1`,
+    [limit],
+  );
+
+  return result.rows.map((row) => ({
+    conversationId: row.conversation_id,
+    protocolId: row.protocol_id,
+    protocolVersionId: row.protocol_version_id,
+    versionNumber: row.version_number,
+    title: row.payload.title,
+    abstract: row.payload.abstract,
+    updatedAt: row.updated_at.toISOString(),
+  } satisfies ConversationListItem));
 }
