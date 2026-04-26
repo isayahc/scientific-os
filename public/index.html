@@ -160,6 +160,7 @@
       }
 
       .message {
+        position: relative;
         max-width: 80%;
         padding: 14px 16px;
         border-radius: 18px;
@@ -235,6 +236,26 @@
 
       .message a {
         color: #7dd3fc;
+      }
+
+      .copy-message {
+        display: block;
+        height: auto;
+        margin-top: 12px;
+        padding: 6px 10px;
+        border-radius: 999px;
+        border: 1px solid rgba(148, 163, 184, 0.22);
+        background: rgba(15, 23, 42, 0.8);
+        color: #c9d7ee;
+        font-size: 0.78rem;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      .message.user .copy-message {
+        margin-left: auto;
+        background: rgba(255, 255, 255, 0.12);
+        color: #eff6ff;
       }
 
       .image-preview-link {

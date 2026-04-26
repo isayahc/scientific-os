@@ -110,6 +110,7 @@ export type ProtocolRecord = {
     units: string;
     notes: string;
   };
+  wasteByproducts: string[];
   safetyConsiderations: string[];
   procedure: string[];
   references: string[];

@@ -34,6 +34,7 @@ export async function generateImageBuffer({
   openai,
   prompt,
   model = "gpt-5.5",
+  // model = "gpt-image-1",
 }: GenerateImageOptions) {
   const response = await openai.responses.create({
     model,
@@ -54,6 +55,7 @@ export async function generateImageFollowUpBuffer({
   previousResponseId,
   prompt,
   model = "gpt-5.5",
+  // model = "gpt-image-1",
 }: GenerateImageFollowUpOptions) {
   const response = await openai.responses.create({
     model,

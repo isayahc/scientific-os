@@ -66,6 +66,7 @@ const ProtocolSchema = z.object({
     units: z.string(),
     notes: z.string(),
   }),
+  wasteByproducts: z.array(z.string()),
   safetyConsiderations: z.array(z.string()),
   procedure: z.array(z.string()),
   references: z.array(z.string()),
@@ -217,6 +218,7 @@ function orderProtocolOutput(protocol: z.infer<typeof ProtocolSchema>) {
     timeline: protocol.timeline,
     energyCost: protocol.energyCost,
     waterCost: protocol.waterCost,
+    wasteByproducts: protocol.wasteByproducts,
     safetyConsiderations: protocol.safetyConsiderations,
     procedure: protocol.procedure,
     references: protocol.references,
@@ -252,6 +254,7 @@ const PROTOCOL_COMPONENTS = [
   "timeline",
   "energyCost",
   "waterCost",
+  "wasteByproducts",
   "safetyConsiderations",
   "procedure",
   "references",
@@ -272,6 +275,7 @@ function detectRequestedProtocolComponents(prompt: string): ProtocolComponent[] 
     ["timeline", ["timeline", "duration", "prep time", "run time"]],
     ["energyCost", ["energy cost", "energy", "power"]],
     ["waterCost", ["water cost", "water", "water usage", "water consumption"]],
+    ["wasteByproducts", ["waste", "byproducts", "by-products", "disposal", "waste stream"]],
     ["safetyConsiderations", ["safety", "safety considerations", "hazards"]],
     ["procedure", ["procedure", "steps", "method", "protocol steps"]],
     ["references", ["references", "citations", "sources"]],
@@ -322,6 +326,9 @@ function mergeProtocolUpdate(
         break;
       case "waterCost":
         mergedProtocol.waterCost = updatedProtocol.waterCost;
+        break;
+      case "wasteByproducts":
+        mergedProtocol.wasteByproducts = updatedProtocol.wasteByproducts;
         break;
       case "safetyConsiderations":
         mergedProtocol.safetyConsiderations = updatedProtocol.safetyConsiderations;
@@ -377,6 +384,7 @@ async function createProtocolEmbedding(protocol: z.infer<typeof ProtocolSchema>)
     `Procedure: ${protocol.procedure.join(" ")}`,
     `Safety considerations: ${protocol.safetyConsiderations.join(" ")}`,
     `Water cost: ${protocol.waterCost.estimate} ${protocol.waterCost.units}. ${protocol.waterCost.notes}`,
+    `Waste and byproducts: ${protocol.wasteByproducts.join(" ")}`,
     `References: ${protocol.references.join(" ")}`,
   ].join("\n");
 
@@ -548,6 +556,45 @@ function getDiagramContext(runContext: unknown): DiagramToolContext {
   return context as DiagramToolContext;
 }
 
+async function getDiagramProtocolReference(runContext: unknown) {
+  const context = getDiagramContext(runContext);
+
+  if (!context.protocolId) {
+    return null;
+  }
+
+  const latestVersion = await getLatestProtocolVersion(context.protocolId);
+
+  if (!latestVersion) {
+    return null;
+  }
+
+  const protocol = orderProtocolOutput(ProtocolSchema.parse(latestVersion.payload));
+
+  return {
+    protocolId: context.protocolId,
+    versionNumber: latestVersion.version_number,
+    protocol,
+    referenceText: [
+      "Active protocol reference for image composition only; do not render this text in the image.",
+      `Protocol: ${protocol.title}`,
+      `Abstract: ${protocol.abstract}`,
+      `Equipment: ${protocol.equipment.join(", ")}`,
+      `Materials, reagents, and supplies: ${protocol.materialsReagents.join(", ")}`,
+      `Safety considerations: ${protocol.safetyConsiderations.join("; ")}`,
+      `Procedure stages: ${protocol.procedure.join(" -> ")}`,
+    ].join("\n"),
+  };
+}
+
+function getProtocolDiagramModules(protocol: z.infer<typeof ProtocolSchema>) {
+  return [
+    ...protocol.equipment.slice(0, 6).map((item) => `protocol equipment module represented visually as ${item}`),
+    ...protocol.materialsReagents.slice(0, 6).map((item) => `protocol supply or reagent module represented visually as ${item}`),
+    ...protocol.procedure.slice(0, 5).map((step, index) => `protocol process stage ${index + 1} represented visually from: ${step}`),
+  ];
+}
+
 async function generateDiagramAsset(args: {
   toolName: string;
   filePrefix: string;
@@ -592,19 +639,116 @@ async function generateDiagramAsset(args: {
   };
 }
 
+function buildImageGenerationPrompt(args: {
+  viewType: string;
+  systemType: string;
+  targetUsecase: string;
+  sceneMode: string;
+  layoutStyle: string;
+  backgroundType: string;
+  modules: string[];
+  connectionTypes: string;
+  materialStyle: string;
+  structureStyle: string;
+  perspectiveType: string;
+  optionalOutputHints?: string | null;
+}) {
+  return [
+    `${args.viewType} rendering of a ${args.systemType}, designed for ${args.targetUsecase}.`,
+    "",
+    "Scene:",
+    "",
+    `* ${args.sceneMode} arranged ${args.layoutStyle}`,
+    `* clean ${args.backgroundType} background`,
+    "* no text, no labels, no arrows",
+    "",
+    "System composition:",
+    "",
+    "* includes the following modules:",
+    ...args.modules.map((module) => `  ${module}`),
+    `* modules connected via ${args.connectionTypes} (pipes, conveyors, wiring, tubing)`,
+    "",
+    "Design language:",
+    "",
+    `* materials: ${args.materialStyle} (e.g. stainless steel, polymer, aluminum)`,
+    `* structural style: ${args.structureStyle} (industrial, lab-scale, compact, containerized)`,
+    "* visible features: bolts, seams, motors, access panels",
+    "",
+    "Rendering style:",
+    "",
+    `* perspective: ${args.perspectiveType} (isometric, orthographic, top-down)`,
+    "* lighting: neutral, soft shadows",
+    "* color: solid colors, minimal textures",
+    "* high detail but low visual clutter",
+    "",
+    "Geometry constraints:",
+    "",
+    "* each module clearly separable",
+    "* minimal occlusion between major components",
+    "* consistent scale and proportions",
+    "* clean edges and well-defined surfaces",
+    "",
+    "Additional constraints:",
+    "",
+    "* no people",
+    "* no UI elements",
+    "* no decorative noise",
+    "",
+    args.optionalOutputHints ?? "",
+  ].filter((line) => line !== null).join("\n");
+}
+
 const generateLabeledIsometricDiagramTool = tool({
   name: "generate_labeled_isometric_system_diagram",
   description:
-    "Generates a labeled isometric start-to-finish diagram of the science-agent system, including UI, APIs, agent tools, Tavily, Postgres, pgvector, versions, conversations, and generated outputs.",
+    "Generates an isometric start-to-finish rendering of the science-agent system as a visual diagram using spatial layout and connections only. No text, labels, or arrows are rendered.",
   parameters: diagramToolParameters,
   execute: async ({ focus }, runContext) => {
-    const prompt = [
-      "Create a polished isometric technical architecture diagram for a science protocol generation app.",
-      "Show the flow start to finish with readable labels and arrows.",
-      "Include: browser chat UI, conversations sidebar, New Chat button, Express API routes, OpenAI Agents SDK, protocol generator, search_protocols Tavily tool, search_saved_protocols pgvector tool, supply pricing lookup tool, OpenAI embeddings, Postgres database, protocols table, protocol_versions table, conversations table, conversation_snapshots table, pgvector similarity search, versioning v1 to vN, structured protocol output, and saved conversation snapshots.",
-      "Use an isometric 3D layout, clean dark background, cyan/purple accents, grouped modules, and concise labels.",
-      focus ? `Extra focus: ${focus}` : null,
-    ].filter(Boolean).join(" ");
+    const protocolReference = await getDiagramProtocolReference(runContext);
+    const protocolModules = protocolReference
+      ? getProtocolDiagramModules(protocolReference.protocol)
+      : [];
+    const prompt = buildImageGenerationPrompt({
+      viewType: "isometric",
+      systemType: protocolReference
+        ? `${protocolReference.protocol.title} protocol generation and execution system`
+        : "science protocol generation system",
+      targetUsecase:
+        "visual system diagram for explaining the complete start-to-finish protocol generation workflow, while remaining suitable for image-to-3D reconstruction and modular system design",
+
+      sceneMode: "single continuous diagram system",
+      layoutStyle:
+        "left-to-right process-flow diagram using spatial arrangement and physical connections instead of text labels or arrows",
+      backgroundType: "dark studio",
+
+      modules: [
+        ...protocolModules,
+      ],
+
+      connectionTypes:
+        "wiring, tubing, and compact data conduits forming clear process flow connections",
+
+      materialStyle:
+        "brushed stainless steel, matte polymer, dark aluminum, translucent acrylic",
+
+      structureStyle:
+        "compact lab-scale modular industrial system with clearly separable components",
+
+      perspectiveType: "isometric with minimal distortion",
+
+      optionalOutputHints: [
+        // "No text, no labels, no arrows, no readable UI.",
+        "Diagram flow must be understandable purely from layout and connections.",
+        // "Each module should be geometrically distinct and separable.",
+        // "Minimize occlusion between major components.",
+        // "Use consistent scale and proportions.",
+        // "Clean hard-surface geometry with sharp edges.",
+        protocolReference?.referenceText ?? null,
+        focus ? `Optional output hints: ${focus}` : null,
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    });
 
     const result = await generateDiagramAsset({
       toolName: "generate_labeled_isometric_system_diagram",
@@ -613,7 +757,7 @@ const generateLabeledIsometricDiagramTool = tool({
       runContext,
     });
 
-    return `Generated labeled isometric system diagram: ${result.url} (asset ${result.assetId}, response ${result.openaiResponseId})`;
+    return `Generated isometric system rendering: ${result.url} (asset ${result.assetId}, response ${result.openaiResponseId})`;
   },
 });
 
@@ -623,13 +767,41 @@ const generateUnlabeledToolsDiagramTool = tool({
     "Generates the same isometric system/tools diagram without any writing, text, labels, letters, or numbers.",
   parameters: diagramToolParameters,
   execute: async ({ focus }, runContext) => {
-    const prompt = [
-      "Create an isometric 3D visual diagram of a science protocol generation app as connected tools and components only.",
-      "Show the same system as icons/objects: browser UI, chat, sidebar, API server, agent brain, web search tool, internal database search tool, pricing lookup, embeddings engine, Postgres database, vector store, protocol versions, conversation snapshots, and structured protocol output.",
-      "Absolutely no writing, no labels, no letters, no numbers, no readable text, no UI words, no captions, and no symbols that look like text.",
-      "Use visual icons, arrows, connectors, and grouped modules only. Dark background with cyan/purple accents.",
-      focus ? `Extra visual focus: ${focus}` : null,
-    ].filter(Boolean).join(" ");
+    const protocolReference = await getDiagramProtocolReference(runContext);
+    const protocolModules = protocolReference
+      ? getProtocolDiagramModules(protocolReference.protocol)
+      : [];
+    const prompt = buildImageGenerationPrompt({
+      viewType: "isometric",
+      systemType: protocolReference
+        ? `tool-only ${protocolReference.protocol.title} protocol automation machine`
+        : "tool-only science protocol automation machine",
+      targetUsecase: "showing only the operational tools and components without any writing",
+      sceneMode: "modular components",
+      layoutStyle: "in a semicircular toolbench arrangement",
+      backgroundType: "dark studio",
+      modules: [
+        "abstract agent core module",
+        "external web search instrument",
+        "internal vector search instrument",
+        "pricing lookup instrument",
+        "embedding engine cylinder",
+        "Postgres data vault",
+        "MinIO storage vault",
+        "protocol versioning stack",
+        "conversation snapshot stack",
+        "final structured output assembler",
+        ...protocolModules,
+      ],
+      connectionTypes: "wiring, tubing, and small data conduits",
+      materialStyle: "stainless steel, matte polymer, aluminum, glass-like acrylic",
+      structureStyle: "compact containerized lab-scale industrial",
+      perspectiveType: "isometric",
+      optionalOutputHints: [
+        protocolReference?.referenceText ?? null,
+        focus ? `Optional output hints: ${focus}` : null,
+      ].filter(Boolean).join("\n"),
+    });
 
     const result = await generateDiagramAsset({
       toolName: "generate_unlabeled_tools_diagram",
@@ -648,7 +820,7 @@ const port = Number(process.env.PORT ?? 3000);
 const agent = new Agent({
   name: "Science Assistant",
   instructions:
-    "You are a protocol authoring assistant. Search context may already be provided in the conversation; use that first and do not repeatedly call search_protocols. If the user asks whether a similar internal protocol already exists, use search_saved_protocols. The only approved repositories for external protocol evidence are protocols.io, bio-protocol.org, nature.com/nprot, jove.com, and openwetware.org. Fill these fields only from retrieved evidence when possible in this exact order: title, abstract, equipment, materialsReagents, cost, timeline, energyCost, waterCost, safetyConsiderations, procedure, references. Do not invent unsupported references and do not rely on sites outside the approved repositories. Treat materialsReagents as the full set of consumables, reagents, and general supplies needed for the protocol. Represent cost as { estimate, currency, notes, lineItems } where lineItems is an array and may be empty before vendor pricing enrichment. Represent timeline as { duration, prepTime, runTime }, energyCost as { estimate, units, notes }, and waterCost as { estimate, units, notes } where estimate is a numeric value, not text. Estimate waterCost conservatively from expected water usage for washing, rinsing, buffer/media preparation, cooling, and cleanup. Estimate all costs conservatively from the retrieved protocol evidence and typical lab execution requirements. Put citation strings and URLs in references, and write procedure as an ordered list of concrete steps.",
+    "You are a protocol authoring assistant. Search context may already be provided in the conversation; use that first and do not repeatedly call search_protocols. If the user asks whether a similar internal protocol already exists, use search_saved_protocols. The only approved repositories for external protocol evidence are protocols.io, bio-protocol.org, nature.com/nprot, jove.com, and openwetware.org. Fill these fields only from retrieved evidence when possible in this exact order: title, abstract, equipment, materialsReagents, cost, timeline, energyCost, waterCost, wasteByproducts, safetyConsiderations, procedure, references. Do not invent unsupported references and do not rely on sites outside the approved repositories. Treat materialsReagents as the full set of consumables, reagents, and general supplies needed for the protocol. Represent cost as { estimate, currency, notes, lineItems } where lineItems is an array and may be empty before vendor pricing enrichment. Represent timeline as { duration, prepTime, runTime }, energyCost as { estimate, units, notes }, and waterCost as { estimate, units, notes } where estimate is a numeric value, not text. List wasteByproducts as concrete waste streams, disposable materials, chemical/biological byproducts, and disposal-relevant outputs expected from the protocol. Estimate waterCost conservatively from expected water usage for washing, rinsing, buffer/media preparation, cooling, and cleanup. Estimate all costs conservatively from the retrieved protocol evidence and typical lab execution requirements. Put citation strings and URLs in references, and write procedure as an ordered list of concrete steps.",
   outputType: ProtocolSchema,
   tools: [searchWebTool, searchSavedProtocolsTool],
 });
