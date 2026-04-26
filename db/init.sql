@@ -6,6 +6,13 @@ CREATE TABLE IF NOT EXISTS protocols (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS conversations (
+  id UUID PRIMARY KEY,
+  protocol_id UUID REFERENCES protocols(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS protocol_versions (
   id UUID PRIMARY KEY,
   protocol_id UUID NOT NULL REFERENCES protocols(id) ON DELETE CASCADE,
@@ -24,3 +31,14 @@ CREATE INDEX IF NOT EXISTS protocol_versions_protocol_id_idx
 CREATE INDEX IF NOT EXISTS protocol_versions_embedding_idx
   ON protocol_versions USING ivfflat (embedding vector_cosine_ops)
   WITH (lists = 100);
+
+CREATE TABLE IF NOT EXISTS conversation_snapshots (
+  id UUID PRIMARY KEY,
+  conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  protocol_version_id UUID NOT NULL REFERENCES protocol_versions(id) ON DELETE CASCADE,
+  messages JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS conversation_snapshots_conversation_id_idx
+  ON conversation_snapshots (conversation_id, created_at DESC);

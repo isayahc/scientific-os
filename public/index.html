@@ -57,9 +57,30 @@
         font-size: 1rem;
       }
 
+      .sidebar-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 8px;
+      }
+
+      .sidebar-head h2 {
+        margin: 0;
+      }
+
       .sidebar p {
         margin: 0 0 16px;
         color: #9fb0d1;
+      }
+
+      .sidebar-action {
+        height: auto;
+        padding: 10px 12px;
+        border-radius: 12px;
+        background: rgba(56, 189, 248, 0.18);
+        color: #e5eefc;
+        border: 1px solid rgba(56, 189, 248, 0.3);
       }
 
       .protocol-list {
@@ -159,6 +180,28 @@
         border: 1px solid rgba(148, 163, 184, 0.18);
       }
 
+      .loading-message {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .spinner {
+        width: 16px;
+        height: 16px;
+        border-radius: 999px;
+        border: 2px solid rgba(125, 211, 252, 0.25);
+        border-top-color: #7dd3fc;
+        animation: spin 0.8s linear infinite;
+        flex: 0 0 auto;
+      }
+
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
       .message h3 {
         margin: 0 0 8px;
         font-size: 0.95rem;
@@ -255,8 +298,11 @@
     <main class="shell">
       <section class="layout">
         <aside class="panel sidebar">
-          <h2>Saved Protocols</h2>
-          <p>Latest versions saved in Postgres appear here.</p>
+          <div class="sidebar-head">
+            <h2>Conversations</h2>
+            <button id="new-chat" class="sidebar-action" type="button">New Chat</button>
+          </div>
+          <p>Saved protocol conversations appear here.</p>
           <section id="protocol-list" class="protocol-list"></section>
         </aside>
 
