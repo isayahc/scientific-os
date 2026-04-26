@@ -56,6 +56,27 @@ CREATE TABLE IF NOT EXISTS conversation_snapshots (
 
 CREATE INDEX IF NOT EXISTS conversation_snapshots_conversation_id_idx
   ON conversation_snapshots (conversation_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS generated_assets (
+  id UUID PRIMARY KEY,
+  conversation_id UUID REFERENCES conversations(id) ON DELETE SET NULL,
+  protocol_id UUID REFERENCES protocols(id) ON DELETE SET NULL,
+  protocol_version_id UUID REFERENCES protocol_versions(id) ON DELETE SET NULL,
+  asset_type TEXT NOT NULL,
+  tool_name TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  bucket TEXT NOT NULL,
+  object_key TEXT NOT NULL,
+  url TEXT NOT NULL,
+  content_type TEXT NOT NULL,
+  openai_response_id TEXT,
+  previous_response_id TEXT,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS generated_assets_conversation_id_idx
+  ON generated_assets (conversation_id, created_at DESC);
 `;
 
 export type ProtocolRecord = {
@@ -89,6 +110,7 @@ export type ProtocolRecord = {
     units: string;
     notes: string;
   };
+  wasteByproducts: string[];
   safetyConsiderations: string[];
   procedure: string[];
   references: string[];
@@ -482,4 +504,61 @@ export async function listConversations(limit: number) {
     abstract: row.payload.abstract,
     updatedAt: row.updated_at.toISOString(),
   } satisfies ConversationListItem));
+}
+
+export async function saveGeneratedAsset(args: {
+  conversationId?: string | null;
+  protocolId?: string | null;
+  protocolVersionId?: string | null;
+  assetType: string;
+  toolName: string;
+  prompt: string;
+  bucket: string;
+  objectKey: string;
+  url: string;
+  contentType: string;
+  openaiResponseId?: string | null;
+  previousResponseId?: string | null;
+  metadata?: Record<string, unknown>;
+}) {
+  await ensureDatabaseSchema();
+
+  const id = randomUUID();
+
+  await pool.query(
+    `INSERT INTO generated_assets (
+       id,
+       conversation_id,
+       protocol_id,
+       protocol_version_id,
+       asset_type,
+       tool_name,
+       prompt,
+       bucket,
+       object_key,
+       url,
+       content_type,
+       openai_response_id,
+       previous_response_id,
+       metadata
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb)`,
+    [
+      id,
+      args.conversationId ?? null,
+      args.protocolId ?? null,
+      args.protocolVersionId ?? null,
+      args.assetType,
+      args.toolName,
+      args.prompt,
+      args.bucket,
+      args.objectKey,
+      args.url,
+      args.contentType,
+      args.openaiResponseId ?? null,
+      args.previousResponseId ?? null,
+      JSON.stringify(args.metadata ?? {}),
+    ],
+  );
+
+  return { assetId: id };
 }

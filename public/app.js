@@ -117,6 +117,70 @@ function formatLabel(label) {
     .trim();
 }
 
+function extractImageUrls(text) {
+  return [...text.matchAll(/https?:\/\/[^\s)]+\.(?:png|jpg|jpeg|webp)/gi)]
+    .map((match) => match[0]);
+}
+
+function renderTextContent(content) {
+  const container = document.createElement("div");
+  const text = document.createElement("p");
+  text.textContent = content;
+  container.appendChild(text);
+
+  const imageUrls = extractImageUrls(content);
+
+  for (const imageUrl of imageUrls) {
+    const link = document.createElement("a");
+    link.href = imageUrl;
+    link.target = "_blank";
+    link.rel = "noreferrer";
+    link.className = "image-preview-link";
+
+    const image = document.createElement("img");
+    image.src = imageUrl;
+    image.alt = "Generated image";
+    image.className = "image-preview";
+    image.loading = "lazy";
+
+    link.appendChild(image);
+    container.appendChild(link);
+  }
+
+  return container;
+}
+
+function getCopyText(content) {
+  if (typeof content === "string") {
+    return content;
+  }
+
+  return JSON.stringify(content, null, 2);
+}
+
+function addCopyButton(element, content) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "copy-message";
+  button.textContent = "Copy";
+  button.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(getCopyText(content));
+      button.textContent = "Copied";
+      window.setTimeout(() => {
+        button.textContent = "Copy";
+      }, 1200);
+    } catch {
+      button.textContent = "Failed";
+      window.setTimeout(() => {
+        button.textContent = "Copy";
+      }, 1200);
+    }
+  });
+
+  element.appendChild(button);
+}
+
 function renderStructuredContent(content) {
   const container = document.createElement("div");
 
@@ -245,8 +309,10 @@ function renderMessages() {
     if (message.content && typeof message.content === "object") {
       element.appendChild(renderStructuredContent(message.content));
     } else {
-      element.textContent = message.content;
+      element.appendChild(renderTextContent(String(message.content)));
     }
+
+    addCopyButton(element, message.content);
 
     messagesRoot.appendChild(element);
   }
@@ -270,6 +336,7 @@ function renderMessages() {
     const meta = document.createElement("article");
     meta.className = "message assistant";
     meta.textContent = `Saved as protocol ${currentProtocolId} v${currentVersionNumber}`;
+    addCopyButton(meta, meta.textContent);
     messagesRoot.appendChild(meta);
   }
 
