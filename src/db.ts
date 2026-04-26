@@ -84,6 +84,11 @@ export type ProtocolRecord = {
     units: string;
     notes: string;
   };
+  waterCost: {
+    estimate: number;
+    units: string;
+    notes: string;
+  };
   safetyConsiderations: string[];
   procedure: string[];
   references: string[];

@@ -57,6 +57,11 @@ const ProtocolSchema = z.object({
     units: z.string(),
     notes: z.string(),
   }),
+  waterCost: z.object({
+    estimate: z.number(),
+    units: z.string(),
+    notes: z.string(),
+  }),
   safetyConsiderations: z.array(z.string()),
   procedure: z.array(z.string()),
   references: z.array(z.string()),
@@ -207,6 +212,7 @@ function orderProtocolOutput(protocol: z.infer<typeof ProtocolSchema>) {
     cost: protocol.cost,
     timeline: protocol.timeline,
     energyCost: protocol.energyCost,
+    waterCost: protocol.waterCost,
     safetyConsiderations: protocol.safetyConsiderations,
     procedure: protocol.procedure,
     references: protocol.references,
@@ -241,6 +247,7 @@ const PROTOCOL_COMPONENTS = [
   "cost",
   "timeline",
   "energyCost",
+  "waterCost",
   "safetyConsiderations",
   "procedure",
   "references",
@@ -260,6 +267,7 @@ function detectRequestedProtocolComponents(prompt: string): ProtocolComponent[] 
     ["cost", ["cost", "price", "pricing", "budget", "line items"]],
     ["timeline", ["timeline", "duration", "prep time", "run time"]],
     ["energyCost", ["energy cost", "energy", "power"]],
+    ["waterCost", ["water cost", "water", "water usage", "water consumption"]],
     ["safetyConsiderations", ["safety", "safety considerations", "hazards"]],
     ["procedure", ["procedure", "steps", "method", "protocol steps"]],
     ["references", ["references", "citations", "sources"]],
@@ -307,6 +315,9 @@ function mergeProtocolUpdate(
         break;
       case "energyCost":
         mergedProtocol.energyCost = updatedProtocol.energyCost;
+        break;
+      case "waterCost":
+        mergedProtocol.waterCost = updatedProtocol.waterCost;
         break;
       case "safetyConsiderations":
         mergedProtocol.safetyConsiderations = updatedProtocol.safetyConsiderations;
@@ -361,6 +372,7 @@ async function createProtocolEmbedding(protocol: z.infer<typeof ProtocolSchema>)
     `Materials and reagents: ${protocol.materialsReagents.join(", ")}`,
     `Procedure: ${protocol.procedure.join(" ")}`,
     `Safety considerations: ${protocol.safetyConsiderations.join(" ")}`,
+    `Water cost: ${protocol.waterCost.estimate} ${protocol.waterCost.units}. ${protocol.waterCost.notes}`,
     `References: ${protocol.references.join(" ")}`,
   ].join("\n");
 
@@ -515,7 +527,7 @@ const port = Number(process.env.PORT ?? 3000);
 const agent = new Agent({
   name: "Science Assistant",
   instructions:
-    "You are a protocol authoring assistant. Search context may already be provided in the conversation; use that first and do not repeatedly call search_protocols. If the user asks whether a similar internal protocol already exists, use search_saved_protocols. The only approved repositories for external protocol evidence are protocols.io, bio-protocol.org, nature.com/nprot, jove.com, and openwetware.org. Fill these fields only from retrieved evidence when possible in this exact order: title, abstract, equipment, materialsReagents, cost, timeline, energyCost, safetyConsiderations, procedure, references. Do not invent unsupported references and do not rely on sites outside the approved repositories. Treat materialsReagents as the full set of consumables, reagents, and general supplies needed for the protocol. Represent cost as { estimate, currency, notes, lineItems } where lineItems is an array and may be empty before vendor pricing enrichment. Represent timeline as { duration, prepTime, runTime }, and energyCost as { estimate, units, notes } where estimate is a numeric value, not text. Estimate them conservatively from the retrieved protocol evidence and typical lab execution requirements. Put citation strings and URLs in references, and write procedure as an ordered list of concrete steps.",
+    "You are a protocol authoring assistant. Search context may already be provided in the conversation; use that first and do not repeatedly call search_protocols. If the user asks whether a similar internal protocol already exists, use search_saved_protocols. The only approved repositories for external protocol evidence are protocols.io, bio-protocol.org, nature.com/nprot, jove.com, and openwetware.org. Fill these fields only from retrieved evidence when possible in this exact order: title, abstract, equipment, materialsReagents, cost, timeline, energyCost, waterCost, safetyConsiderations, procedure, references. Do not invent unsupported references and do not rely on sites outside the approved repositories. Treat materialsReagents as the full set of consumables, reagents, and general supplies needed for the protocol. Represent cost as { estimate, currency, notes, lineItems } where lineItems is an array and may be empty before vendor pricing enrichment. Represent timeline as { duration, prepTime, runTime }, energyCost as { estimate, units, notes }, and waterCost as { estimate, units, notes } where estimate is a numeric value, not text. Estimate waterCost conservatively from expected water usage for washing, rinsing, buffer/media preparation, cooling, and cleanup. Estimate all costs conservatively from the retrieved protocol evidence and typical lab execution requirements. Put citation strings and URLs in references, and write procedure as an ordered list of concrete steps.",
   outputType: ProtocolSchema,
   tools: [searchWebTool, searchSavedProtocolsTool],
 });
