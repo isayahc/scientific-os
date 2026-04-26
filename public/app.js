@@ -117,6 +117,39 @@ function formatLabel(label) {
     .trim();
 }
 
+function extractImageUrls(text) {
+  return [...text.matchAll(/https?:\/\/[^\s)]+\.(?:png|jpg|jpeg|webp)/gi)]
+    .map((match) => match[0]);
+}
+
+function renderTextContent(content) {
+  const container = document.createElement("div");
+  const text = document.createElement("p");
+  text.textContent = content;
+  container.appendChild(text);
+
+  const imageUrls = extractImageUrls(content);
+
+  for (const imageUrl of imageUrls) {
+    const link = document.createElement("a");
+    link.href = imageUrl;
+    link.target = "_blank";
+    link.rel = "noreferrer";
+    link.className = "image-preview-link";
+
+    const image = document.createElement("img");
+    image.src = imageUrl;
+    image.alt = "Generated image";
+    image.className = "image-preview";
+    image.loading = "lazy";
+
+    link.appendChild(image);
+    container.appendChild(link);
+  }
+
+  return container;
+}
+
 function renderStructuredContent(content) {
   const container = document.createElement("div");
 
@@ -245,7 +278,7 @@ function renderMessages() {
     if (message.content && typeof message.content === "object") {
       element.appendChild(renderStructuredContent(message.content));
     } else {
-      element.textContent = message.content;
+      element.appendChild(renderTextContent(String(message.content)));
     }
 
     messagesRoot.appendChild(element);

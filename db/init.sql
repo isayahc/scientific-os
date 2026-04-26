@@ -42,3 +42,24 @@ CREATE TABLE IF NOT EXISTS conversation_snapshots (
 
 CREATE INDEX IF NOT EXISTS conversation_snapshots_conversation_id_idx
   ON conversation_snapshots (conversation_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS generated_assets (
+  id UUID PRIMARY KEY,
+  conversation_id UUID REFERENCES conversations(id) ON DELETE SET NULL,
+  protocol_id UUID REFERENCES protocols(id) ON DELETE SET NULL,
+  protocol_version_id UUID REFERENCES protocol_versions(id) ON DELETE SET NULL,
+  asset_type TEXT NOT NULL,
+  tool_name TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  bucket TEXT NOT NULL,
+  object_key TEXT NOT NULL,
+  url TEXT NOT NULL,
+  content_type TEXT NOT NULL,
+  openai_response_id TEXT,
+  previous_response_id TEXT,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS generated_assets_conversation_id_idx
+  ON generated_assets (conversation_id, created_at DESC);

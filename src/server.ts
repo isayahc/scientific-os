@@ -1,5 +1,7 @@
 import "dotenv/config";
 
+import { randomUUID } from "node:crypto";
+
 import OpenAI from "openai";
 import cors from "cors";
 import express from "express";
@@ -7,7 +9,9 @@ import { Agent, assistant, run, setDefaultOpenAIKey, system, tool, user } from "
 import { tavily } from "@tavily/core";
 import { z } from "zod";
 
-import { ensureDatabaseSchema, getConversation, getLatestConversationSnapshot, getLatestProtocolVersion, listConversations, saveConversationSnapshot, saveProtocolVersion, searchLatestProtocolVersions } from "./db.js";
+import { ensureDatabaseSchema, getConversation, getLatestConversationSnapshot, getLatestProtocolVersion, listConversations, saveConversationSnapshot, saveGeneratedAsset, saveProtocolVersion, searchLatestProtocolVersions } from "./db.js";
+import { generateImageBuffer } from "./imageGeneration.js";
+import { ensureObjectStorage, uploadImageObject } from "./objectStorage.js";
 
 type ChatMessage = {
   role: "user" | "assistant" | "system";
@@ -521,6 +525,123 @@ const searchSavedProtocolsTool = tool({
   },
 });
 
+const diagramToolParameters = z.object({
+  focus: z.string().nullable().describe("Optional extra focus for the generated system diagram."),
+});
+
+type DiagramToolContext = {
+  conversationId?: string | null;
+  protocolId?: string | null;
+  protocolVersionId?: string | null;
+};
+
+function getDiagramContext(runContext: unknown): DiagramToolContext {
+  if (typeof runContext !== "object" || runContext === null || !("context" in runContext)) {
+    return {};
+  }
+
+  const context = (runContext as { context?: unknown }).context;
+  if (typeof context !== "object" || context === null) {
+    return {};
+  }
+
+  return context as DiagramToolContext;
+}
+
+async function generateDiagramAsset(args: {
+  toolName: string;
+  filePrefix: string;
+  prompt: string;
+  runContext: unknown;
+}) {
+  const context = getDiagramContext(args.runContext);
+  const objectKey = `diagrams/${args.filePrefix}-${randomUUID()}.png`;
+  const generated = await generateImageBuffer({
+    openai: openaiClient,
+    prompt: args.prompt,
+  });
+  const uploaded = await uploadImageObject({
+    objectKey,
+    body: generated.buffer,
+    metadata: {
+      toolName: args.toolName,
+      openaiResponseId: generated.responseId,
+    },
+  });
+  const asset = await saveGeneratedAsset({
+    conversationId: context.conversationId ?? null,
+    protocolId: context.protocolId ?? null,
+    protocolVersionId: context.protocolVersionId ?? null,
+    assetType: "image/png",
+    toolName: args.toolName,
+    prompt: args.prompt,
+    bucket: uploaded.bucket,
+    objectKey: uploaded.objectKey,
+    url: uploaded.url,
+    contentType: "image/png",
+    openaiResponseId: generated.responseId,
+    metadata: {
+      storage: "minio",
+    },
+  });
+
+  return {
+    ...asset,
+    ...uploaded,
+    openaiResponseId: generated.responseId,
+  };
+}
+
+const generateLabeledIsometricDiagramTool = tool({
+  name: "generate_labeled_isometric_system_diagram",
+  description:
+    "Generates a labeled isometric start-to-finish diagram of the science-agent system, including UI, APIs, agent tools, Tavily, Postgres, pgvector, versions, conversations, and generated outputs.",
+  parameters: diagramToolParameters,
+  execute: async ({ focus }, runContext) => {
+    const prompt = [
+      "Create a polished isometric technical architecture diagram for a science protocol generation app.",
+      "Show the flow start to finish with readable labels and arrows.",
+      "Include: browser chat UI, conversations sidebar, New Chat button, Express API routes, OpenAI Agents SDK, protocol generator, search_protocols Tavily tool, search_saved_protocols pgvector tool, supply pricing lookup tool, OpenAI embeddings, Postgres database, protocols table, protocol_versions table, conversations table, conversation_snapshots table, pgvector similarity search, versioning v1 to vN, structured protocol output, and saved conversation snapshots.",
+      "Use an isometric 3D layout, clean dark background, cyan/purple accents, grouped modules, and concise labels.",
+      focus ? `Extra focus: ${focus}` : null,
+    ].filter(Boolean).join(" ");
+
+    const result = await generateDiagramAsset({
+      toolName: "generate_labeled_isometric_system_diagram",
+      filePrefix: "isometric-system",
+      prompt,
+      runContext,
+    });
+
+    return `Generated labeled isometric system diagram: ${result.url} (asset ${result.assetId}, response ${result.openaiResponseId})`;
+  },
+});
+
+const generateUnlabeledToolsDiagramTool = tool({
+  name: "generate_unlabeled_tools_diagram",
+  description:
+    "Generates the same isometric system/tools diagram without any writing, text, labels, letters, or numbers.",
+  parameters: diagramToolParameters,
+  execute: async ({ focus }, runContext) => {
+    const prompt = [
+      "Create an isometric 3D visual diagram of a science protocol generation app as connected tools and components only.",
+      "Show the same system as icons/objects: browser UI, chat, sidebar, API server, agent brain, web search tool, internal database search tool, pricing lookup, embeddings engine, Postgres database, vector store, protocol versions, conversation snapshots, and structured protocol output.",
+      "Absolutely no writing, no labels, no letters, no numbers, no readable text, no UI words, no captions, and no symbols that look like text.",
+      "Use visual icons, arrows, connectors, and grouped modules only. Dark background with cyan/purple accents.",
+      focus ? `Extra visual focus: ${focus}` : null,
+    ].filter(Boolean).join(" ");
+
+    const result = await generateDiagramAsset({
+      toolName: "generate_unlabeled_tools_diagram",
+      filePrefix: "isometric-tools-only",
+      prompt,
+      runContext,
+    });
+
+    return `Generated unlabeled tools-only diagram: ${result.url} (asset ${result.assetId}, response ${result.openaiResponseId})`;
+  },
+});
+
 const app = express();
 const port = Number(process.env.PORT ?? 3000);
 
@@ -535,8 +656,12 @@ const agent = new Agent({
 const chatAgent = new Agent({
   name: "Science Chat Assistant",
   instructions:
-    "You are a concise science assistant. Answer directly. If the user asks about protocol version state, explain it from the provided context only. If the user asks whether a similar saved protocol exists, use search_saved_protocols. Do not generate a new protocol unless explicitly asked.",
-  tools: [searchSavedProtocolsTool],
+    "You are a concise science assistant. Answer directly. If the user asks about protocol version state, explain it from the provided context only. If the user asks whether a similar saved protocol exists, use search_saved_protocols. If the user asks for architecture/system/tool diagrams, use the diagram generation tools. Do not generate a new protocol unless explicitly asked.",
+  tools: [
+    searchSavedProtocolsTool,
+    generateLabeledIsometricDiagramTool,
+    generateUnlabeledToolsDiagramTool,
+  ],
 });
 
 app.use(cors());
@@ -739,7 +864,13 @@ app.post("/api/chat", async (req, res) => {
     }
 
     if (!shouldGenerateProtocol) {
-      const chatResult = await run(chatAgent, input);
+      const chatResult = await run(chatAgent, input, {
+        context: {
+          conversationId: conversationId ?? null,
+          protocolId: activeProtocolId,
+          protocolVersionId: latestVersion?.id ?? null,
+        },
+      });
       const reply = typeof chatResult.finalOutput === "string"
         ? chatResult.finalOutput
         : JSON.stringify(chatResult.finalOutput, null, 2);
@@ -834,6 +965,7 @@ app.post("/api/chat", async (req, res) => {
 
 async function start() {
   await ensureDatabaseSchema();
+  await ensureObjectStorage();
 
   app.listen(port, () => {
     console.log(`Chat app running at http://localhost:${port}`);
