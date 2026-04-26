@@ -71,8 +71,6 @@ export type ProtocolRecord = {
       item: string;
       supplier: string;
       estimate: string;
-      currency: string;
-      notes: string;
       sourceUrl: string;
     }>;
   };
@@ -82,7 +80,7 @@ export type ProtocolRecord = {
     runTime: string;
   };
   energyCost: {
-    estimate: string;
+    estimate: number;
     units: string;
     notes: string;
   };
@@ -156,6 +154,15 @@ type ConversationListRow = {
   version_number: number | null;
   payload: ProtocolRecord;
   updated_at: Date;
+};
+
+type ConversationSnapshotRow = {
+  conversation_id: string;
+  protocol_id: string | null;
+  protocol_version_id: string;
+  version_number: number | null;
+  messages: ConversationMessageRecord[];
+  created_at: Date;
 };
 
 export async function ensureDatabaseSchema() {
@@ -310,6 +317,42 @@ export async function saveConversationSnapshot(args: {
   } finally {
     client.release();
   }
+}
+
+export async function getLatestConversationSnapshot(conversationId: string) {
+  await ensureDatabaseSchema();
+
+  const result = await pool.query<ConversationSnapshotRow>(
+    `SELECT
+       c.id AS conversation_id,
+       c.protocol_id,
+       cs.protocol_version_id,
+       pv.version_number,
+       cs.messages,
+       cs.created_at
+     FROM conversations c
+     JOIN conversation_snapshots cs ON cs.conversation_id = c.id
+     JOIN protocol_versions pv ON pv.id = cs.protocol_version_id
+     WHERE c.id = $1
+     ORDER BY cs.created_at DESC
+     LIMIT 1`,
+    [conversationId],
+  );
+
+  const row = result.rows[0];
+
+  if (!row) {
+    return null;
+  }
+
+  return {
+    conversationId: row.conversation_id,
+    protocolId: row.protocol_id,
+    protocolVersionId: row.protocol_version_id,
+    versionNumber: row.version_number,
+    messages: row.messages,
+    createdAt: row.created_at.toISOString(),
+  };
 }
 
 export async function getLatestProtocolVersion(protocolId: string) {

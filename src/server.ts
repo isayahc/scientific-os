@@ -7,7 +7,7 @@ import { Agent, assistant, run, setDefaultOpenAIKey, system, tool, user } from "
 import { tavily } from "@tavily/core";
 import { z } from "zod";
 
-import { ensureDatabaseSchema, getConversation, getLatestProtocolVersion, listConversations, saveConversationSnapshot, saveProtocolVersion, searchLatestProtocolVersions } from "./db.js";
+import { ensureDatabaseSchema, getConversation, getLatestConversationSnapshot, getLatestProtocolVersion, listConversations, saveConversationSnapshot, saveProtocolVersion, searchLatestProtocolVersions } from "./db.js";
 
 type ChatMessage = {
   role: "user" | "assistant" | "system";
@@ -44,8 +44,6 @@ const ProtocolSchema = z.object({
       item: z.string(),
       supplier: z.string(),
       estimate: z.string(),
-      currency: z.string(),
-      notes: z.string(),
       sourceUrl: z.string(),
     })),
   }),
@@ -55,7 +53,7 @@ const ProtocolSchema = z.object({
     runTime: z.string(),
   }),
   energyCost: z.object({
-    estimate: z.string(),
+    estimate: z.number(),
     units: z.string(),
     notes: z.string(),
   }),
@@ -213,6 +211,26 @@ function orderProtocolOutput(protocol: z.infer<typeof ProtocolSchema>) {
     procedure: protocol.procedure,
     references: protocol.references,
   };
+}
+
+function orderConversationMessageContent(content: ChatMessage["content"]) {
+  if (!content || typeof content !== "object" || Array.isArray(content)) {
+    return content;
+  }
+
+  const parsed = ProtocolSchema.safeParse(content);
+  if (!parsed.success) {
+    return content;
+  }
+
+  return orderProtocolOutput(parsed.data);
+}
+
+function orderConversationMessages(messages: ChatMessage[]) {
+  return messages.map((message) => ({
+    ...message,
+    content: orderConversationMessageContent(message.content),
+  }));
 }
 
 const PROTOCOL_COMPONENTS = [
@@ -384,24 +402,20 @@ async function searchSupplyPricing(supplies: string[]) {
     });
 
     if (!result) {
-      return {
+        return {
         item,
         supplier: "Unknown",
         estimate: "Pricing not found",
-        currency: "USD",
-        notes: "No vendor pricing snippet was found in the indexed search results.",
         sourceUrl: "",
       };
-    }
+      }
 
     const price = extractPriceSnippet(`${result.title} ${result.content}`);
 
-    return {
+      return {
       item,
       supplier: getPricingSourceType(result.url),
       estimate: price.estimate,
-      currency: price.currency,
-      notes: result.content,
       sourceUrl: result.url,
     };
   }));
@@ -501,7 +515,7 @@ const port = Number(process.env.PORT ?? 3000);
 const agent = new Agent({
   name: "Science Assistant",
   instructions:
-    "You are a protocol authoring assistant. Search context may already be provided in the conversation; use that first and do not repeatedly call search_protocols. If the user asks whether a similar internal protocol already exists, use search_saved_protocols. The only approved repositories for external protocol evidence are protocols.io, bio-protocol.org, nature.com/nprot, jove.com, and openwetware.org. Fill these fields only from retrieved evidence when possible in this exact order: title, abstract, equipment, materialsReagents, cost, timeline, energyCost, safetyConsiderations, procedure, references. Do not invent unsupported references and do not rely on sites outside the approved repositories. Treat materialsReagents as the full set of consumables, reagents, and general supplies needed for the protocol. Represent cost as { estimate, currency, notes, lineItems } where lineItems is an array and may be empty before vendor pricing enrichment. Represent timeline as { duration, prepTime, runTime }, and energyCost as { estimate, units, notes }. Estimate them conservatively from the retrieved protocol evidence and typical lab execution requirements. Put citation strings and URLs in references, and write procedure as an ordered list of concrete steps.",
+    "You are a protocol authoring assistant. Search context may already be provided in the conversation; use that first and do not repeatedly call search_protocols. If the user asks whether a similar internal protocol already exists, use search_saved_protocols. The only approved repositories for external protocol evidence are protocols.io, bio-protocol.org, nature.com/nprot, jove.com, and openwetware.org. Fill these fields only from retrieved evidence when possible in this exact order: title, abstract, equipment, materialsReagents, cost, timeline, energyCost, safetyConsiderations, procedure, references. Do not invent unsupported references and do not rely on sites outside the approved repositories. Treat materialsReagents as the full set of consumables, reagents, and general supplies needed for the protocol. Represent cost as { estimate, currency, notes, lineItems } where lineItems is an array and may be empty before vendor pricing enrichment. Represent timeline as { duration, prepTime, runTime }, and energyCost as { estimate, units, notes } where estimate is a numeric value, not text. Estimate them conservatively from the retrieved protocol evidence and typical lab execution requirements. Put citation strings and URLs in references, and write procedure as an ordered list of concrete steps.",
   outputType: ProtocolSchema,
   tools: [searchWebTool, searchSavedProtocolsTool],
 });
@@ -582,11 +596,36 @@ app.get("/api/protocols/:protocolId", async (req, res) => {
     return res.json({
       protocolId,
       versionNumber: protocol.version_number,
-      reply: protocol.payload,
+      reply: orderProtocolOutput(ProtocolSchema.parse(protocol.payload)),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     console.error("[protocol-get] request failed", { protocolId, error });
+    return res.status(500).json({ error: message });
+  }
+});
+
+app.get("/api/conversations/:conversationId", async (req, res) => {
+  const conversationId = req.params.conversationId;
+
+  if (!z.string().uuid().safeParse(conversationId).success) {
+    return res.status(400).json({ error: "Invalid conversation id" });
+  }
+
+  try {
+    const snapshot = await getLatestConversationSnapshot(conversationId);
+
+    if (!snapshot) {
+      return res.status(404).json({ error: "Conversation not found" });
+    }
+
+    return res.json({
+      ...snapshot,
+      messages: orderConversationMessages(snapshot.messages as ChatMessage[]),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    console.error("[conversation-get] request failed", { conversationId, error });
     return res.status(500).json({ error: message });
   }
 });
@@ -689,20 +728,32 @@ app.post("/api/chat", async (req, res) => {
 
     if (!shouldGenerateProtocol) {
       const chatResult = await run(chatAgent, input);
+      const reply = typeof chatResult.finalOutput === "string"
+        ? chatResult.finalOutput
+        : JSON.stringify(chatResult.finalOutput, null, 2);
+      const savedConversation = activeProtocolId && latestVersion
+        ? await saveConversationSnapshot({
+            conversationId: conversationId ?? undefined,
+            protocolId: activeProtocolId,
+            protocolVersionId: latestVersion.id,
+            messages: [
+              ...messages,
+              { role: "assistant", content: reply },
+            ],
+          })
+        : null;
 
       console.log("[chat] request succeeded", {
-        conversationId: conversationId ?? null,
-        protocolId: protocolId ?? null,
+        conversationId: savedConversation?.conversationId ?? conversationId ?? null,
+        protocolId: activeProtocolId,
         versionNumber: latestVersion?.version_number ?? null,
         durationMs: Date.now() - requestStartedAt,
         mode: "chat",
       });
 
       return res.json({
-        reply: typeof chatResult.finalOutput === "string"
-          ? chatResult.finalOutput
-          : JSON.stringify(chatResult.finalOutput, null, 2),
-        conversationId: conversationId ?? null,
+        reply,
+        conversationId: savedConversation?.conversationId ?? conversationId ?? null,
         protocolId: activeProtocolId,
         versionNumber: latestVersion?.version_number ?? null,
       });
@@ -737,7 +788,10 @@ app.post("/api/chat", async (req, res) => {
       conversationId: conversationId ?? undefined,
       protocolId: savedVersion.protocolId,
       protocolVersionId: savedVersion.versionId,
-      messages,
+      messages: [
+        ...messages,
+        { role: "assistant", content: orderedProtocol },
+      ],
     });
 
     console.log("[chat] request succeeded", {

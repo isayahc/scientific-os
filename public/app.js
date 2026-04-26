@@ -3,6 +3,7 @@ const promptInput = document.querySelector("#prompt");
 const messagesRoot = document.querySelector("#messages");
 const sendButton = document.querySelector("#send");
 const protocolListRoot = document.querySelector("#protocol-list");
+const newChatButton = document.querySelector("#new-chat");
 
 const messages = [
   {
@@ -15,30 +16,36 @@ let currentProtocolId = null;
 let currentVersionNumber = null;
 let currentConversationId = null;
 let savedConversations = [];
+let isLoading = false;
 
-async function selectProtocol(protocolId) {
+function resetChat() {
+  currentProtocolId = null;
+  currentVersionNumber = null;
+  currentConversationId = null;
+  messages.length = 0;
+  messages.push({
+    role: "assistant",
+    content: "Hi, I'm your science agent. Ask me anything.",
+  });
+  renderSavedConversations();
+  renderMessages();
+  promptInput.focus();
+}
+
+async function selectConversation(conversationId) {
   try {
-    const response = await fetch(`/api/protocols/${protocolId}`);
+    const response = await fetch(`/api/conversations/${conversationId}`);
     const payload = await response.json();
 
     if (!response.ok) {
-      throw new Error(payload.error || "Failed to load protocol");
+      throw new Error(payload.error || "Failed to load conversation");
     }
 
+    currentConversationId = payload.conversationId;
     currentProtocolId = payload.protocolId;
     currentVersionNumber = payload.versionNumber;
-    currentConversationId = null;
     messages.length = 0;
-    messages.push(
-      {
-        role: "assistant",
-        content: "Loaded saved protocol. You can now ask to modify it.",
-      },
-      {
-        role: "assistant",
-        content: payload.reply,
-      },
-    );
+    messages.push(...payload.messages);
     renderSavedConversations();
     renderMessages();
   } catch (error) {
@@ -67,10 +74,7 @@ function renderSavedConversations() {
     item.dataset.conversationId = conversation.conversationId;
     item.setAttribute("aria-pressed", String(conversation.conversationId === currentConversationId));
     item.addEventListener("click", () => {
-      currentConversationId = conversation.conversationId;
-      if (conversation.protocolId) {
-        void selectProtocol(conversation.protocolId);
-      }
+      void selectConversation(conversation.conversationId);
     });
 
     const title = document.createElement("strong");
@@ -247,6 +251,21 @@ function renderMessages() {
     messagesRoot.appendChild(element);
   }
 
+  if (isLoading) {
+    const loading = document.createElement("article");
+    loading.className = "message assistant loading-message";
+
+    const spinner = document.createElement("span");
+    spinner.className = "spinner";
+    spinner.setAttribute("aria-hidden", "true");
+
+    const text = document.createElement("span");
+    text.textContent = "Building response...";
+
+    loading.append(spinner, text);
+    messagesRoot.appendChild(loading);
+  }
+
   if (currentProtocolId && currentVersionNumber) {
     const meta = document.createElement("article");
     meta.className = "message assistant";
@@ -259,6 +278,7 @@ function renderMessages() {
 
 async function sendMessage(userMessage) {
   messages.push({ role: "user", content: userMessage });
+  isLoading = true;
   renderMessages();
 
   sendButton.disabled = true;
@@ -295,7 +315,9 @@ async function sendMessage(userMessage) {
     });
     renderMessages();
   } finally {
+    isLoading = false;
     sendButton.disabled = false;
+    renderMessages();
     promptInput.focus();
   }
 }
@@ -310,6 +332,10 @@ form.addEventListener("submit", async (event) => {
 
   promptInput.value = "";
   await sendMessage(value);
+});
+
+newChatButton.addEventListener("click", () => {
+  resetChat();
 });
 
 loadSavedConversations();
