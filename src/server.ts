@@ -94,6 +94,11 @@ const SavedProtocolSearchResultSchema = z.object({
   })),
 });
 
+const ProtocolIterationSchema = z.object({
+  protocol: ProtocolSchema,
+  iterationSummary: z.string(),
+});
+
 const PROTOCOL_DOMAINS = [
   "protocols.io",
   "bio-protocol.org",
@@ -261,6 +266,15 @@ const PROTOCOL_COMPONENTS = [
 ] as const;
 
 type ProtocolComponent = typeof PROTOCOL_COMPONENTS[number];
+
+type ProtocolIterationResult = {
+  conversationId: string;
+  protocolId: string;
+  protocolVersionId: string;
+  versionNumber: number;
+  reply: z.infer<typeof ProtocolSchema>;
+  iterationSummaries: string[];
+};
 
 function detectRequestedProtocolComponents(prompt: string): ProtocolComponent[] {
   const normalized = prompt.toLowerCase();
@@ -533,6 +547,13 @@ const searchSavedProtocolsTool = tool({
   },
 });
 
+const protocolIterationAgent = new Agent({
+  name: "Protocol Iteration Agent",
+  instructions:
+    "You improve an existing structured protocol. Return a complete protocol object plus a concise iterationSummary. If target components are specified, only change those components and preserve all other fields semantically unchanged. Do not call tools. Do not invent new references; preserve or revise references only when explicitly requested or when evidence context supports the change.",
+  outputType: ProtocolIterationSchema,
+});
+
 const diagramToolParameters = z.object({
   focus: z.string().nullable().describe("Optional extra focus for the generated system diagram."),
 });
@@ -541,6 +562,8 @@ type DiagramToolContext = {
   conversationId?: string | null;
   protocolId?: string | null;
   protocolVersionId?: string | null;
+  messages?: ChatMessage[];
+  iterationResult?: ProtocolIterationResult | null;
 };
 
 function getDiagramContext(runContext: unknown): DiagramToolContext {
@@ -594,6 +617,109 @@ function getProtocolDiagramModules(protocol: z.infer<typeof ProtocolSchema>) {
     ...protocol.procedure.slice(0, 5).map((step, index) => `protocol process stage ${index + 1} represented visually from: ${step}`),
   ];
 }
+
+const iterateProtocolTool = tool({
+  name: "iterate_protocol",
+  description:
+    "Improves the currently active saved protocol through one to three critique/revision passes, then saves the result as the next protocol version.",
+  parameters: z.object({
+    feedback: z.string().min(1).describe("The user's feedback or improvement request."),
+    targetComponents: z.array(z.enum(PROTOCOL_COMPONENTS)).nullable().describe("Specific protocol components to update, or null for broad improvement."),
+    iterations: z.number().int().min(1).max(3).nullable().describe("Number of improvement passes, capped at 3."),
+    refreshEvidence: z.boolean().nullable().describe("Whether to refresh external protocol evidence before improving."),
+  }),
+  execute: async ({ feedback, targetComponents, iterations, refreshEvidence }, runContext) => {
+    const context = getDiagramContext(runContext);
+
+    if (!context.protocolId) {
+      return "No active protocol is loaded. Load or generate a protocol before iterating it.";
+    }
+
+    const latestVersion = await getLatestProtocolVersion(context.protocolId);
+    if (!latestVersion) {
+      return "No saved protocol version was found for the active protocol.";
+    }
+
+    const requestedComponents = targetComponents?.length
+      ? targetComponents
+      : detectRequestedProtocolComponents(feedback);
+    const iterationCount = Math.max(1, Math.min(iterations ?? 1, 3));
+    const evidenceContext = refreshEvidence
+      ? await searchProtocols({
+          query: feedback,
+          topic: "general",
+          maxResults: 5,
+          timeRange: null,
+        })
+      : null;
+
+    let workingProtocol = orderProtocolOutput(ProtocolSchema.parse(latestVersion.payload));
+    const iterationSummaries: string[] = [];
+
+    for (let index = 0; index < iterationCount; index += 1) {
+      const iterationPrompt = [
+        `Iteration pass ${index + 1} of ${iterationCount}.`,
+        `User feedback: ${feedback}`,
+        requestedComponents.length > 0
+          ? `Only update these components: ${requestedComponents.join(", ")}. Preserve all other components.`
+          : "No specific components were provided; improve the protocol broadly but conservatively.",
+        evidenceContext ? `Evidence context JSON: ${JSON.stringify(evidenceContext)}` : null,
+        `Current protocol JSON: ${JSON.stringify(workingProtocol)}`,
+      ].filter(Boolean).join("\n\n");
+
+      const iterationResult = await run(protocolIterationAgent, iterationPrompt, { maxTurns: 3 });
+      const parsedIteration = ProtocolIterationSchema.parse(iterationResult.finalOutput);
+      workingProtocol = orderProtocolOutput(mergeProtocolUpdate(
+        workingProtocol,
+        parsedIteration.protocol,
+        requestedComponents,
+      ));
+      iterationSummaries.push(parsedIteration.iterationSummary);
+    }
+
+    if (requestedComponents.length === 0 || requestedComponents.includes("cost")) {
+      const pricingLineItems = await searchSupplyPricing([
+        ...workingProtocol.materialsReagents,
+        ...workingProtocol.equipment,
+      ]);
+      workingProtocol.cost = {
+        ...workingProtocol.cost,
+        notes: pricingLineItems.length > 0
+          ? `${workingProtocol.cost.notes} Vendor pricing references were searched for listed supplies, materials, reagents, and selected equipment.`.trim()
+          : workingProtocol.cost.notes,
+        lineItems: pricingLineItems,
+      };
+    }
+
+    const embedding = await createProtocolEmbedding(workingProtocol);
+    const savedVersion = await saveProtocolVersion({
+      protocolId: context.protocolId,
+      prompt: feedback,
+      payload: workingProtocol,
+      embedding,
+    });
+    const savedConversation = await saveConversationSnapshot({
+      conversationId: context.conversationId ?? undefined,
+      protocolId: savedVersion.protocolId,
+      protocolVersionId: savedVersion.versionId,
+      messages: [
+        ...(context.messages ?? []),
+        { role: "assistant", content: workingProtocol },
+      ],
+    });
+
+    context.iterationResult = {
+      conversationId: savedConversation.conversationId,
+      protocolId: savedVersion.protocolId,
+      protocolVersionId: savedVersion.versionId,
+      versionNumber: savedVersion.versionNumber,
+      reply: workingProtocol,
+      iterationSummaries,
+    };
+
+    return `Iterated protocol ${savedVersion.protocolId} to v${savedVersion.versionNumber}. ${iterationSummaries.join(" ")}`;
+  },
+});
 
 async function generateDiagramAsset(args: {
   toolName: string;
@@ -828,9 +954,10 @@ const agent = new Agent({
 const chatAgent = new Agent({
   name: "Science Chat Assistant",
   instructions:
-    "You are a concise science assistant. Answer directly. If the user asks about protocol version state, explain it from the provided context only. If the user asks whether a similar saved protocol exists, use search_saved_protocols. If the user asks for architecture/system/tool diagrams, use the diagram generation tools. Do not generate a new protocol unless explicitly asked.",
+    "You are a concise science assistant. Answer directly. If the user asks about protocol version state, explain it from the provided context only. If the user asks whether a similar saved protocol exists, use search_saved_protocols. If the user asks to improve, optimize, iterate, refine, or make the active protocol better, use iterate_protocol. If the user asks for architecture/system/tool diagrams, use the diagram generation tools. Do not generate a new protocol unless explicitly asked.",
   tools: [
     searchSavedProtocolsTool,
+    iterateProtocolTool,
     generateLabeledIsometricDiagramTool,
     generateUnlabeledToolsDiagramTool,
   ],
@@ -1036,13 +1163,35 @@ app.post("/api/chat", async (req, res) => {
     }
 
     if (!shouldGenerateProtocol) {
+      const chatContext: DiagramToolContext = {
+        conversationId: conversationId ?? null,
+        protocolId: activeProtocolId,
+        protocolVersionId: latestVersion?.id ?? null,
+        messages,
+        iterationResult: null,
+      };
       const chatResult = await run(chatAgent, input, {
-        context: {
-          conversationId: conversationId ?? null,
-          protocolId: activeProtocolId,
-          protocolVersionId: latestVersion?.id ?? null,
-        },
+        context: chatContext,
       });
+
+      if (chatContext.iterationResult) {
+        console.log("[chat] request succeeded", {
+          conversationId: chatContext.iterationResult.conversationId,
+          protocolId: chatContext.iterationResult.protocolId,
+          versionNumber: chatContext.iterationResult.versionNumber,
+          durationMs: Date.now() - requestStartedAt,
+          mode: "iterate_protocol",
+        });
+
+        return res.json({
+          reply: chatContext.iterationResult.reply,
+          conversationId: chatContext.iterationResult.conversationId,
+          protocolId: chatContext.iterationResult.protocolId,
+          versionNumber: chatContext.iterationResult.versionNumber,
+          iterationSummaries: chatContext.iterationResult.iterationSummaries,
+        });
+      }
+
       const reply = typeof chatResult.finalOutput === "string"
         ? chatResult.finalOutput
         : JSON.stringify(chatResult.finalOutput, null, 2);
